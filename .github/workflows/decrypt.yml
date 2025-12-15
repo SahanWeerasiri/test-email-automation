@@ -1,0 +1,79 @@
+name: PGP Decryption Service
+
+on:
+  workflow_dispatch:
+    inputs:
+      encrypted_content:
+        description: 'The PGP armored block to decrypt'
+        required: true
+        type: string
+      key_passphrase:
+        description: 'The passphrase for the private key (SECRET)'
+        required: true
+        type: string
+      private_key:
+        description: 'Name of the GitHub Secret containing the Private Key'
+        required: true
+        type: string
+
+jobs:
+  decrypt:
+    runs-on: ubuntu-latest
+    
+    # SECURITY NOTE: Use permissions: write/contents for actions that push results, 
+    # but be mindful of the risks associated with exposing secrets.
+    permissions:
+      contents: read
+
+    steps:
+      - name: 🔐 Setup GnuPG and Import Private Key
+        run: |
+          # 1. Create a temporary, isolated GPG home directory
+          export GNUPGHOME=$(mktemp -d)
+          echo "GPG Home set to: $GNUPGHOME"
+
+          # 2. Retrieve the Private Key from GitHub Secrets
+          PRIVATE_KEY="${{ secrets[github.event.inputs.private_key] }}"
+          
+          # 3. Import the private key (using --batch and --import for non-interactive)
+          echo "$PRIVATE_KEY" | gpg --batch --import
+
+          # 4. Optional: Trust the key (for unattended use)
+          # Get the key fingerprint (replace 'SERVER_KEY_ID' with your actual key ID/email)
+          # In a real scenario, you'd extract the key ID dynamically
+          KEY_FINGERPRINT=$(gpg --list-keys --with-colons | grep -B 1 "SERVER_KEY_ID" | head -n 1 | awk -F: '{print $5}')
+          echo -e "5\ny\n" | gpg --command-fd 0 --edit-key "$KEY_FINGERPRINT" trust
+        
+        # NOTE: Use 'SERVER_KEY_ID' as a placeholder for the server key's UID/Email.
+        # This part requires you to know a key identifier.
+
+      - name: 🔑 Decrypt Content
+        id: decrypt_step
+        env:
+          PASSPHRASE: ${{ github.event.inputs.key_passphrase }}
+          ENCRYPTED_DATA: ${{ github.event.inputs.encrypted_content }}
+        run: |
+          # Write the encrypted data to a temporary file
+          echo "$ENCRYPTED_DATA" > encrypted.pgp
+          
+          # Use the passphrase environment variable to automatically enter the key phrase
+          # The result of decryption is output to the standard output
+          DECRYPTED_RESULT=$(gpg --batch --passphrase-fd 0 --output - --decrypt encrypted.pgp <<< "$PASSPHRASE")
+
+          # Set the decrypted content as an output variable for subsequent steps
+          echo "decrypted_content<<EOF" >> $GITHUB_OUTPUT
+          echo "$DECRYPTED_RESULT" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+          
+      - name: ✅ Display Decrypted Result (For Testing Only!)
+        run: |
+          echo "Decryption Status: Success!"
+          echo "Decrypted Content:"
+          echo "${{ steps.decrypt_step.outputs.decrypted_content }}"
+          
+      - name: 🗑️ Cleanup
+        # Crucial step: Remove the temporary GPG home directory immediately
+        if: always()
+        run: rm -rf "$GNUPGHOME"
+        env:
+          GNUPGHOME: ${{ steps.decrypt_step.outputs.GNUPGHOME }} # Pass the path if possible
