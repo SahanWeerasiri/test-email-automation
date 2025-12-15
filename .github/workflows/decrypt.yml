@@ -6,12 +6,12 @@ on:
 
 jobs:
   decrypt:
-    # --- 1. Condition: Only run if the issue title starts with "DECRYPT" ---
+    # Only run if the issue title starts with "DECRYPT"
     if: startsWith(github.event.issue.title, 'DECRYPT')
 
     runs-on: ubuntu-latest
     
-    # --- 2. Permissions: Needed to read secrets, issue body, and write comments/close issue ---
+    # Permissions are crucial for security and functionality (reading secrets, writing comment/closing issue)
     permissions:
       contents: read
       issues: write 
@@ -20,7 +20,7 @@ jobs:
       - name: 🔍 Extract Encrypted Content from Issue Body
         id: parse_issue
         run: |
-          # Use awk to find the PGP block pattern in the issue body
+          # Use awk to find and extract the full PGP MESSAGE block
           ENCRYPTED_DATA=$(echo "${{ github.event.issue.body }}" | awk '/-----BEGIN PGP MESSAGE-----/,/-----END PGP MESSAGE-----/')
           
           if [ -z "$ENCRYPTED_DATA" ]; then
@@ -33,42 +33,53 @@ jobs:
           # Save the data to a temporary file for the gpg command
           echo "$ENCRYPTED_DATA" > encrypted.pgp
         
-      - name: 🔐 Setup GnuPG and Import Private Key
-        # Only proceed if the PGP block was successfully found
+      - name: 🔐 Setup GnuPG, Import Key, and Set Trust (FIXED)
+        # Proceed only if content was found
         if: success() && steps.parse_issue.outputs.ENCRYPTED_CONTENT_FOUND == 'true'
         run: |
-          # Create a temporary, isolated GPG home directory
+          # 1. Create a temporary, isolated GPG home directory
           export GNUPGHOME=$(mktemp -d)
           echo "GPG Home set to: $GNUPGHOME"
+          
+          # --- IMPORTANT: REPLACE WITH YOUR KEY'S EMAIL/UID ---
+          KEY_ID="smudunlahiru@gmail.com"
+          # ---------------------------------------------------
 
-          # Import the Private Key from GitHub Secrets
+          # 2. Import the Private Key from GitHub Secrets
           echo "${{ secrets.GPG_PRIVATE_KEY }}" | gpg --batch --import
           
-          # Optional: Trust the key for non-interactive use
-          KEY_FINGERPRINT=$(gpg --list-secret-keys --with-colons | grep "^fpr" | awk -F: '{print $10}' | head -n 1)
+          # 3. FIX: Set the key to ultimate trust non-interactively
+          # Get the full fingerprint for the imported secret key
+          KEY_FINGERPRINT=$(gpg --list-secret-keys --with-colons | grep -B 1 "$KEY_ID" | head -n 1 | awk -F: '{print $5}')
+          
           if [ -n "$KEY_FINGERPRINT" ]; then
+            echo "Setting ultimate trust (level 6) for fingerprint: $KEY_FINGERPRINT"
+            # Use import-ownertrust to set the trust level without needing a TTY
             echo "$KEY_FINGERPRINT:6:" | gpg --import-ownertrust
+            echo "Key trust successfully updated."
+          else
+            echo "Warning: Could not find key fingerprint for $KEY_ID. Check KEY_ID variable."
           fi
           
           echo "GNUPGHOME=$GNUPGHOME" >> $GITHUB_ENV # Store GPG home for cleanup
           
-      - name: 🔑 Decrypt Content
+      - name: 🔑 Decrypt Content (FIXED)
         id: decrypt_step
         if: success()
         env:
           PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }} # Securely retrieve passphrase
           
         run: |
-          # Use the passphrase environment variable via standard input (fd 0)
-          DECRYPTED_RESULT=$(gpg --batch --passphrase-fd 0 --output - --decrypt encrypted.pgp 2>&1 <<< "$PASSPHRASE")
+          # Use GPG_BATCH=true and --passphrase-fd 0 for non-interactive operation
+          DECRYPTED_RESULT=$(gpg --batch --passphrase-fd 0 --output - --decrypt encrypted.pgp 2>&1 <<< "${{ env.PASSPHRASE }}")
 
           # Check for decryption failure message in the output
           if echo "$DECRYPTED_RESULT" | grep -q "gpg: decryption failed:"; then
-            echo "DECRYPTED_CONTENT=Decryption failed. Check action logs for GPG errors." >> $GITHUB_OUTPUT
+            echo "DECRYPTED_CONTENT=Decryption failed. Please verify the key and passphrase used for encryption." >> $GITHUB_OUTPUT
             echo "DECRYPT_STATUS=failed" >> $GITHUB_OUTPUT
           else
             echo "Decryption succeeded."
-            # Use multi-line output variable syntax
+            # Set the decrypted content as a multi-line output
             echo "DECRYPTED_CONTENT<<EOF" >> $GITHUB_OUTPUT
             echo "$DECRYPTED_RESULT" >> $GITHUB_OUTPUT
             echo "EOF" >> $GITHUB_OUTPUT
@@ -77,7 +88,7 @@ jobs:
           
       - name: 💬 Comment Decryption Result and Close Issue
         uses: peter-evans/create-or-update-comment@v3
-        if: always() # Run even if decryption failed to report the status
+        if: always() # Ensure status is reported even on failure
         with:
           issue-number: ${{ github.event.issue.number }}
           body: |
@@ -96,7 +107,7 @@ jobs:
           issue-state: ${{ steps.decrypt_step.outputs.DECRYPT_STATUS == 'success' && 'closed' || 'open' }}
             
       - name: 🗑️ Cleanup
-        # Remove the temporary GPG home directory immediately, even if previous steps failed
+        # Remove the temporary GPG home directory immediately
         if: always()
         run: rm -rf "${{ env.GNUPGHOME }}"
         env:
