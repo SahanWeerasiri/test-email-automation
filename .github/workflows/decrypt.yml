@@ -52,7 +52,7 @@ jobs:
           echo "${{ secrets.GPG_PRIVATE_KEY }}" | gpg --batch --import
           
           # 2. Test Private Key and Passphrase Combination (Reliability Check)
-          echo "${{ env.PASSPHRASE }}" > pass_test.txt
+          echo "${{ secrets.GPG_PASSPHRASE }}" > pass_test.txt
           chmod 600 pass_test.txt
 
           echo "Running passphrase/key access test..."
