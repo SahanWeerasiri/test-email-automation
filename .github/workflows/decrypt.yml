@@ -40,7 +40,7 @@ jobs:
           echo "GPG Home set to: $GNUPGHOME"
           
           # --- IMPORTANT: REPLACE WITH YOUR KEY'S EMAIL/UID ---
-          KEY_ID="smudunlahiru@gmail.com"
+          KEY_ID="test-server@example.com"
           # ---------------------------------------------------
 
           # 2. Import the Private Key from GitHub Secrets
