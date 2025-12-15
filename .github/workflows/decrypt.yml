@@ -60,7 +60,7 @@ jobs:
           
           echo "GNUPGHOME=$GNUPGHOME" >> $GITHUB_ENV # Store GPG home for cleanup
           
-      - name: 🔑 Decrypt Content (FINAL FIX: Exit Code 2/Passphrase)
+      - name: 🔑 Decrypt Content (FINAL FIX)
         id: decrypt_step
         if: success()
         env:
@@ -83,6 +83,7 @@ jobs:
             echo "DECRYPT_STATUS=failed" >> $GITHUB_OUTPUT
           else
             echo "Decryption succeeded."
+            # Set the decrypted content as a multi-line output
             echo "DECRYPTED_CONTENT<<EOF" >> $GITHUB_OUTPUT
             echo "$DECRYPTED_RESULT" >> $GITHUB_OUTPUT
             echo "EOF" >> $GITHUB_OUTPUT
