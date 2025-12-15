@@ -47,7 +47,7 @@ jobs:
           # Optional: Trust the key for non-interactive use
           KEY_FINGERPRINT=$(gpg --list-secret-keys --with-colons | grep "^fpr" | awk -F: '{print $10}' | head -n 1)
           if [ -n "$KEY_FINGERPRINT" ]; then
-            echo -e "5\ny\n" | gpg --command-fd 0 --edit-key "$KEY_FINGERPRINT" trust
+            echo "$KEY_FINGERPRINT:6:" | gpg --import-ownertrust
           fi
           
           echo "GNUPGHOME=$GNUPGHOME" >> $GITHUB_ENV # Store GPG home for cleanup
