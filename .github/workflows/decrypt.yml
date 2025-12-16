@@ -1,17 +1,15 @@
 name: 'GPG Issue Decryptor'
 
 on:
-  # Trigger when a new issue is opened
   issues:
-    types: [opened]
+    types: [opened, edited]
 
 jobs:
   decrypt_and_comment:
     runs-on: ubuntu-latest
     
-    # Permissions are crucial for reading issue body and writing comments/closing
     permissions:
-      issues: write # Allows reading the issue and creating comments/closing
+      issues: write
 
     env:
       GPG_KEY_ID: 'test-server@example.com'
@@ -27,6 +25,9 @@ jobs:
             const issueBody = context.payload.issue.body;
             const issueTitle = context.payload.issue.title;
             const issueNumber = context.payload.issue.number;
+
+            // Use 'core' object for setting outputs
+            const core = require('@actions/core');
 
             // 1. Check if the issue title starts with 'DECRYPT'
             if (!issueTitle.startsWith('DECRYPT')) {
@@ -59,13 +60,13 @@ jobs:
             core.setOutput('encrypted_message', encryptedMessage);
             core.setOutput('issue_number', issueNumber);
             core.setOutput('should_proceed', 'true');
-        shell: bash
+        # --- REMOVE: shell: bash was here ---
 
       - name: Exit if Trigger Not Found or PGP Block Missing
         if: ${{ steps.check_trigger.outputs.should_proceed != 'true' }}
         run: |
           echo "Skipping subsequent steps."
-        shell: bash
+        shell: bash # <--- This is correct because it's under a 'run:' step
 
       ## 1. Import Private GPG Key
       - name: Import GPG Private Key
@@ -74,7 +75,7 @@ jobs:
           echo "${{ env.GPG_PRIVATE_KEY_SECRET }}" | base64 --decode > private.key
           gpg --batch --import --import-options expert private.key
           rm private.key
-        shell: bash
+        shell: bash # <--- This is correct because it's under a 'run:' step
 
       ## 2. Decrypt the Message
       - name: Decrypt PGP Message
@@ -93,19 +94,18 @@ jobs:
               --passphrase "${{ env.GPG_PASSPHRASE_SECRET }}" \
               -d encrypted_message.txt 2>&1)
               
+          # Use the core GitHub Action object to set outputs from a 'run' step
           if [ $? -eq 0 ]; then
-            # Success: Store the decrypted text
-            core.setOutput 'status' 'SUCCESS'
-            core.setOutput 'output' "$DECRYPT_OUTPUT"
+            echo "status=SUCCESS" >> $GITHUB_OUTPUT
+            echo "output=$DECRYPT_OUTPUT" >> $GITHUB_OUTPUT
           else
-            # Failure: Store the failure logs
-            core.setOutput 'status' 'FAILED'
-            core.setOutput 'output' "$DECRYPT_OUTPUT"
+            echo "status=FAILED" >> $GITHUB_OUTPUT
+            echo "output=$DECRYPT_OUTPUT" >> $GITHUB_OUTPUT
           fi
           
           # Clean up the temporary file
           rm encrypted_message.txt
-        shell: bash
+        shell: bash # <--- This is correct because it's under a 'run:' step
 
       ## 3. Post Comment and Close Issue
       - name: Post Result and Close Issue
@@ -145,4 +145,4 @@ jobs:
                     state: issueState
                 });
             }
-        shell: bash
+        # --- REMOVE: shell: bash was here ---
