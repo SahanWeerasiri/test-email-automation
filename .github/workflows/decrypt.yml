@@ -1,148 +1,148 @@
-name: Issue-Based PGP Decryption
+name: 'GPG Issue Decryptor'
 
 on:
+  # Trigger when a new issue is opened
   issues:
     types: [opened]
 
 jobs:
-  decrypt: 
-    # Only run if the issue title starts with "DECRYPT"
-    if: startsWith(github. event.issue.title, 'DECRYPT')
-
+  decrypt_and_comment:
     runs-on: ubuntu-latest
     
+    # Permissions are crucial for reading issue body and writing comments/closing
     permissions:
-      contents: read
-      issues: write # Needed for commenting and closing the issue
+      issues: write # Allows reading the issue and creating comments/closing
+
+    env:
+      GPG_KEY_ID: 'test-server@example.com'
+      GPG_PRIVATE_KEY_SECRET: ${{ secrets.GPG_PRIVATE_KEY }}
+      GPG_PASSPHRASE_SECRET: ${{ secrets.GPG_PASSPHRASE }}
 
     steps:
-      - name: 🔍 Extract Encrypted Content from Issue Body
-        id: parse_issue
+      - name: Check for Trigger Keyword and Extract Encrypted Text
+        id: check_trigger
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const issueBody = context.payload.issue.body;
+            const issueTitle = context.payload.issue.title;
+            const issueNumber = context.payload.issue.number;
+
+            // 1. Check if the issue title starts with 'DECRYPT'
+            if (!issueTitle.startsWith('DECRYPT')) {
+              console.log('Issue title does not start with "DECRYPT". Exiting workflow.');
+              return; // Stop the workflow
+            }
+
+            // 2. Extract the PGP block from the issue body
+            const startTag = '-----BEGIN PGP MESSAGE-----';
+            const endTag = '-----END PGP MESSAGE-----';
+            
+            const startIndex = issueBody.indexOf(startTag);
+            const endIndex = issueBody.indexOf(endTag) + endTag.length;
+            
+            if (startIndex === -1 || endIndex === -1) {
+                await github.rest.issues.createComment({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    issue_number: issueNumber,
+                    body: 'Decryption Failed: Could not find the complete PGP block (-----BEGIN/END PGP MESSAGE-----) in the issue description.'
+                });
+                console.log('Could not find PGP block. Exiting.');
+                return;
+            }
+            
+            // Extract the full PGP block
+            const encryptedMessage = issueBody.substring(startIndex, endIndex);
+            
+            // 3. Set output variable for the next steps
+            core.setOutput('encrypted_message', encryptedMessage);
+            core.setOutput('issue_number', issueNumber);
+            core.setOutput('should_proceed', 'true');
+        shell: bash
+
+      - name: Exit if Trigger Not Found or PGP Block Missing
+        if: ${{ steps.check_trigger.outputs.should_proceed != 'true' }}
         run: |
-          # Use awk to find and extract the full PGP MESSAGE block
-          ENCRYPTED_DATA=$(echo "${{ github.event.issue.body }}" | awk '/-----BEGIN PGP MESSAGE-----/,/-----END PGP MESSAGE-----/')
-          
-          if [ -z "$ENCRYPTED_DATA" ]; then
-            echo "::error:: Could not find PGP MESSAGE block in the issue body."
-            echo "ENCRYPTED_CONTENT_FOUND=false" >> $GITHUB_OUTPUT
-            exit 1
-          fi
-          
-          echo "ENCRYPTED_CONTENT_FOUND=true" >> $GITHUB_OUTPUT
-          # Save the data to a temporary file for the gpg command
-          echo "$ENCRYPTED_DATA" > encrypted.pgp
-        
-      - name: 🔐 Setup GnuPG, Import Key, and Test Passphrase (Diagnostic Included)
-        id: setup_test
-        if: success() && steps.parse_issue.outputs.ENCRYPTED_CONTENT_FOUND == 'true'
-        env: 
-          PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
-          
-        run:  |
-          # --- Environment Setup ---
-          export GNUPGHOME=$(mktemp -d)
-          echo "GPG Home set to: $GNUPGHOME"
-          echo "GNUPGHOME=$GNUPGHOME" >> $GITHUB_ENV 
-          
-          # --- Key Identification ---
-          KEY_ID="test-server@example.com" # Using your provided test key ID
-          echo "Key ID being used: $KEY_ID"
-          
-          # 1. Import the Private Key
-          echo "${{ secrets.GPG_PRIVATE_KEY }}" | gpg --batch --import
-          
-          # 2. Test Private Key and Passphrase Combination (Reliability Check)
-          echo "${{ secrets.GPG_PASSPHRASE }}" > pass_test.txt
-          chmod 600 pass_test.txt
+          echo "Skipping subsequent steps."
+        shell: bash
 
-          echo "Running passphrase/key access test..."
-          TEST_OUTPUT=$(gpg --batch --passphrase-fd 3 --list-secret-keys --with-key-data "$KEY_ID" 3<pass_test.txt 2>&1)
-          TEST_STATUS=$?
-          rm pass_test.txt 
-          
-          if [ $TEST_STATUS -ne 0 ]; then
-              echo "::error::Private key access failed! Passphrase or GPG_PRIVATE_KEY secret is incorrect."
-              echo "GPG Output: $TEST_OUTPUT"
-              exit 1 
-          fi
-          echo "Passphrase test succeeded."
+      ## 1. Import Private GPG Key
+      - name: Import GPG Private Key
+        if: ${{ steps.check_trigger.outputs.should_proceed == 'true' }}
+        run: |
+          echo "${{ env.GPG_PRIVATE_KEY_SECRET }}" | base64 --decode > private.key
+          gpg --batch --import --import-options expert private.key
+          rm private.key
+        shell: bash
 
-          # 3. FIX: Set the key to ultimate trust non-interactively
-          # Uses the most reliable method (awk on 'fpr' marker) for the fingerprint
-          KEY_FINGERPRINT=$(gpg --list-secret-keys --with-colons "$KEY_ID" | awk -F:  '$1 == "fpr" {print $10; exit}')
-          
-          if [ -n "$KEY_FINGERPRINT" ]; then
-            echo "Setting ultimate trust (level 6) for fingerprint: $KEY_FINGERPRINT"
-            echo "$KEY_FINGERPRINT:6:" | gpg --import-ownertrust
-            echo "Key trust successfully updated."
-          else
-            echo ":: error::Could not find key fingerprint. Trust cannot be set."
-            exit 1
-          fi
-          
-      - name: 🔑 Decrypt Content (Uses reliable FD Passphrase Method)
+      ## 2. Decrypt the Message
+      - name: Decrypt PGP Message
         id: decrypt_step
-        if: success()
-        env:
-          PASSPHRASE:  ${{ secrets.GPG_PASSPHRASE }}
-          
+        if: ${{ steps.check_trigger.outputs.should_proceed == 'true' }}
         run: |
-          set +e  # Disable exit on error for this step to handle failures gracefully
+          ENCRYPTED_MESSAGE="${{ steps.check_trigger.outputs.encrypted_message }}"
           
-          # 1. Write the passphrase to a temporary file for reliable passing via FD
-          echo "$PASSPHRASE" > passphrase.txt
-          chmod 600 passphrase.txt
-
-          # 2. Attempt decryption, capturing both stdout and stderr
-          DECRYPTED_RESULT=$(gpg --batch --passphrase-fd 3 --output - --decrypt encrypted.pgp 3<passphrase.txt 2>&1)
-          DECRYPT_EXIT_CODE=$?
+          # Write the PGP message to a temporary file
+          echo "$ENCRYPTED_MESSAGE" > encrypted_message.txt
           
-          # 3. Clean up the passphrase file immediately
-          rm passphrase.txt
-
-          # 4. Check decryption status
-          if [ $DECRYPT_EXIT_CODE -ne 0 ]; then
-            echo ":: warning::Decryption failed with exit code $DECRYPT_EXIT_CODE"
-            echo "DECRYPTED_CONTENT=Decryption failed. The message may not be encrypted to the correct public key, or there was an error processing the encrypted message." >> $GITHUB_OUTPUT
-            echo "DECRYPT_STATUS=failed" >> $GITHUB_OUTPUT
+          # Attempt decryption
+          # Use '2>&1' to capture both stdout and stderr (logs)
+          DECRYPT_OUTPUT=$(gpg --batch --yes \
+              --pinentry-mode loopback \
+              --passphrase "${{ env.GPG_PASSPHRASE_SECRET }}" \
+              -d encrypted_message.txt 2>&1)
+              
+          if [ $? -eq 0 ]; then
+            # Success: Store the decrypted text
+            core.setOutput 'status' 'SUCCESS'
+            core.setOutput 'output' "$DECRYPT_OUTPUT"
           else
-            echo "Decryption succeeded."
-            # Use delimiter to safely capture multi-line output
-            {
-              echo "DECRYPTED_CONTENT<<EOF"
-              echo "$DECRYPTED_RESULT"
-              echo "EOF"
-            } >> $GITHUB_OUTPUT
-            echo "DECRYPT_STATUS=success" >> $GITHUB_OUTPUT
+            # Failure: Store the failure logs
+            core.setOutput 'status' 'FAILED'
+            core.setOutput 'output' "$DECRYPT_OUTPUT"
           fi
           
-      - name: 💬 Comment Decryption Result
-        uses: peter-evans/create-or-update-comment@v3 # Used ONLY for commenting
-        if: always()
-        with:
-          issue-number: ${{ github.event.issue.number }}
-          body: |
-            ## 🔓 PGP Decryption Status: ${{ steps.decrypt_step.outputs.DECRYPT_STATUS }}
-            
-            ${{ steps. decrypt_step.outputs.DECRYPT_STATUS == 'success' && '### Decrypted Content' || ''}}
-            
-            ```plaintext
-            ${{ steps. decrypt_step.outputs.DECRYPTED_CONTENT }}
-            ```
-            
-            ---
-            *Note: This message was automatically generated by the Decryption GitHub Action.*
+          # Clean up the temporary file
+          rm encrypted_message.txt
+        shell: bash
 
-      - name: ❌ Close Issue on Successful Decryption
-        uses: peter-evans/close-issue@v3 # Used dedicated action to close the issue
-        if: success() && steps.decrypt_step.outputs.DECRYPT_STATUS == 'success'
+      ## 3. Post Comment and Close Issue
+      - name: Post Result and Close Issue
+        if: ${{ steps.check_trigger.outputs.should_proceed == 'true' }}
+        uses: actions/github-script@v7
         with:
-          issue-number: ${{ github. event.issue.number }}
-          comment: "Decryption successfully completed. Closing this issue."
-          
-      - name: 🗑️ Cleanup
-        # Remove the temporary GPG home directory immediately
-        if: always()
-        run: rm -rf "${{ env.GNUPGHOME }}"
-        env:
-          GNUPGHOME: ${{ env.GNUPGHOME }}
+          script: |
+            const status = '${{ steps.decrypt_step.outputs.status }}';
+            const output = '${{ steps.decrypt_step.outputs.output }}';
+            const issueNumber = ${{ steps.check_trigger.outputs.issue_number }};
+            const repo = context.repo;
+
+            let commentBody = '';
+            let issueState = 'open';
+
+            if (status === 'SUCCESS') {
+                issueState = 'closed';
+                commentBody = `✅ **Decryption Successful!**\n\n\`\`\`\n${output}\n\`\`\`\n\nThis issue has been closed as the decryption process is complete.`;
+            } else {
+                commentBody = `❌ **Decryption Failed!**\n\nThe GPG tool reported an error. Please check the encrypted message, the recipient key ID (${{ env.GPG_KEY_ID }}), or the passphrase.\n\n**Error/Logs:**\n\`\`\`\n${output}\n\`\`\``;
+            }
+
+            // Post the comment
+            await github.rest.issues.createComment({
+                owner: repo.owner,
+                repo: repo.repo,
+                issue_number: issueNumber,
+                body: commentBody
+            });
+
+            // Close the issue if successful
+            if (issueState === 'closed') {
+                await github.rest.issues.update({
+                    owner: repo.owner,
+                    repo: repo.repo,
+                    issue_number: issueNumber,
+                    state: issueState
+                });
+            }
+        shell: bash
