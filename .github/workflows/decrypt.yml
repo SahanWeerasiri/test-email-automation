@@ -1,20 +1,17 @@
 name: 'GPG Issue Decryptor'
 
 on:
-  # Trigger when a new issue is opened or edited
   issues:
-    types: [opened, edited]
+    types: [opened]
 
 jobs:
   decrypt_and_comment:
     runs-on: ubuntu-latest
     
-    # Permissions are crucial for reading issue body and writing comments/closing
     permissions:
-      issues: write # Allows reading the issue and creating comments/closing
+      issues: write
 
     env:
-      # These environment variables use the secret values defined in your GitHub settings
       GPG_KEY_ID: 'test-server@example.com'
       GPG_PRIVATE_KEY_SECRET: ${{ secrets.GPG_PRIVATE_KEY }}
       GPG_PASSPHRASE_SECRET: ${{ secrets.GPG_PASSPHRASE }}
@@ -33,7 +30,7 @@ jobs:
             // 1. Check if the issue title starts with 'DECRYPT'
             if (!issueTitle.startsWith('DECRYPT')) {
               console.log('Issue title does not start with "DECRYPT". Exiting workflow.');
-              return; // Stop the workflow
+              return;
             }
 
             // 2. Extract the PGP block from the issue body
@@ -44,7 +41,6 @@ jobs:
             const endIndex = issueBody.indexOf(endTag) + endTag.length;
             
             if (startIndex === -1 || endIndex === -1) {
-                // If the block is missing, comment and stop.
                 await github.rest.issues.createComment({
                     owner: context.repo.owner,
                     repo: context.repo.repo,
@@ -55,7 +51,6 @@ jobs:
                 return;
             }
             
-            // Extract the full PGP block
             const encryptedMessage = issueBody.substring(startIndex, endIndex);
             
             // 3. Set output variables for the next bash steps
@@ -68,7 +63,7 @@ jobs:
         run: echo "Skipping subsequent steps."
         shell: bash
 
-      ## 1. Import Private GPG Key (Uses Base64-encoded secret)
+      ## 1. Import Private GPG Key (FIXED: Removed 'expert' option)
       - name: Import GPG Private Key
         if: ${{ steps.check_trigger.outputs.should_proceed == 'true' }}
         run: |
@@ -76,8 +71,8 @@ jobs:
           # Decode the key and write it to a temporary file
           echo "${{ env.GPG_PRIVATE_KEY_SECRET }}" | base64 --decode > private.key
           
-          # Import the key non-interactively
-          gpg --batch --import --import-options expert private.key
+          # Import the key non-interactively using the standard '--batch' option
+          gpg --batch --import private.key
           
           # Clean up the key file immediately
           rm private.key
@@ -95,17 +90,13 @@ jobs:
           
           echo "--- Attempting Decryption ---"
           
-          # GPG Decryption Command:
-          # Capture output/logs using DECRYPT_OUTPUT variable
           DECRYPT_OUTPUT=$(gpg --batch --yes \
               --pinentry-mode loopback \
               --passphrase "${{ env.GPG_PASSPHRASE_SECRET }}" \
               -d encrypted_message.txt 2>&1)
               
-          # Set outputs based on GPG exit code ($?)
           if [ $? -eq 0 ]; then
             echo "status=SUCCESS" >> $GITHUB_OUTPUT
-            # Safely escape the output for the YAML context
             echo "output<<EOF" >> $GITHUB_OUTPUT
             echo "$DECRYPT_OUTPUT" >> $GITHUB_OUTPUT
             echo "EOF" >> $GITHUB_OUTPUT
@@ -116,7 +107,6 @@ jobs:
             echo "EOF" >> $GITHUB_OUTPUT
           fi
           
-          # Clean up the temporary file
           rm encrypted_message.txt
         shell: bash
 
