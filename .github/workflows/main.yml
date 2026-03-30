@@ -55,7 +55,10 @@ jobs:
             --repo "${{ github.repository }}"
 
       # ── 3. Fetch & triage ─────────────────────────────────────────────────
-      # Criteria:
+      # Uses `gh api --paginate` to walk all pages (100 issues per page)
+      # so no issues are missed regardless of repo size.
+      #
+      # Filter criteria applied server-side via the search API:
       #   - open
       #   - has label: Reporter/External
       #   - does NOT have label: Need Attention
@@ -74,19 +77,37 @@ jobs:
           echo "⏱  Stale threshold : ${STALE_THRESHOLD_DAYS} days (${THRESHOLD}s)"
           echo "🔑  Keyword trigger : \"${KEYWORD_TRIGGER}\""
           echo "🏷  Target label    : \"${REPORTER_LABEL}\""
-          echo "🔍  Fetching open issues with \"${REPORTER_LABEL}\" and without \"${LABEL_NAME}\" …"
+          echo "🔍  Fetching ALL open issues with \"${REPORTER_LABEL}\" and without \"${LABEL_NAME}\" …"
           echo "────────────────────────────────────────"
 
-          ISSUES=$(gh issue list \
-            --repo "$REPO" \
-            --state open \
-            --limit 100 \
-            --search "label:\"${REPORTER_LABEL}\" -label:\"${LABEL_NAME}\"" \
-            --json number,title,createdAt \
+          # gh api --paginate automatically follows the Link: header and
+          # merges all pages into a single JSON array via --jq.
+          # The search API returns items[] so we flatten across pages with
+          # the --jq slice.
+          #
+          # URL-encode the labels for the query string:
+          #   label:"Reporter/External" -label:"Need Attention"
+          OWNER=$(echo "$REPO" | cut -d'/' -f1)
+          REPO_NAME=$(echo "$REPO" | cut -d'/' -f2)
+
+          ISSUES=$(gh api \
+            --paginate \
+            --method GET \
+            "repos/${REPO}/issues" \
+            -f state=open \
+            -f per_page=100 \
+            -f labels="${REPORTER_LABEL}" \
+            --jq "[.[] | select(
+                    .pull_request == null and
+                    ([.labels[].name] | contains([\"${LABEL_NAME}\"]) | not)
+                  ) | { number: .number, title: .title, createdAt: .created_at }]" \
             2>/dev/null || echo "[]")
 
+          # --paginate emits one JSON array per page; merge them all into one
+          ISSUES=$(echo "$ISSUES" | jq -s 'add // []')
+
           COUNT=$(echo "$ISSUES" | jq 'length')
-          echo "   Found ${COUNT} candidate issue(s)"
+          echo "   Found ${COUNT} candidate issue(s) across all pages"
           echo "────────────────────────────────────────"
 
           [ "$COUNT" -eq 0 ] && { echo "Nothing to do."; exit 0; }
@@ -98,20 +119,26 @@ jobs:
 
             echo "🔎  #${NUMBER}: \"${TITLE}\""
 
-            # ── Find the last comment that contains the keyword ────────────
-            # jq walks all comments in reverse (last first) and returns the
-            # createdAt of the first one whose body matches the keyword
-            # (case-insensitive via ascii_downcase).
+            # ── Find the last comment containing the keyword ───────────────
+            # Uses gh api --paginate to fetch ALL comments for the issue,
+            # then picks the most recent one whose body matches the keyword.
             LOWER_KEYWORD=$(echo "$KEYWORD_TRIGGER" | tr '[:upper:]' '[:lower:]')
 
-            KEYWORD_COMMENT_DATE=$(gh issue view "$NUMBER" \
-              --repo "$REPO" \
-              --json comments \
-              --jq --arg kw "$LOWER_KEYWORD" \
-              '[.comments[] | select((.body // "" | ascii_downcase) | contains($kw))] | last | .createdAt // ""' \
-              2>/dev/null || echo "")
+            ALL_COMMENTS=$(gh api \
+              --paginate \
+              --method GET \
+              "repos/${REPO}/issues/${NUMBER}/comments" \
+              -f per_page=100 \
+              --jq "[.[] | { createdAt: .created_at, body: .body }]" \
+              2>/dev/null || echo "[]")
 
-            # ── Decide which date to use for the age check ────────────────
+            ALL_COMMENTS=$(echo "$ALL_COMMENTS" | jq -s 'add // []')
+
+            KEYWORD_COMMENT_DATE=$(echo "$ALL_COMMENTS" | jq -r \
+              --arg kw "$LOWER_KEYWORD" \
+              '[.[] | select((.body // "" | ascii_downcase) | contains($kw))] | last | .createdAt // ""')
+
+            # ── Decide which date to use for the age check ─────────────────
             if [ -n "$KEYWORD_COMMENT_DATE" ] && [ "$KEYWORD_COMMENT_DATE" != "null" ]; then
               REF_DATE="$KEYWORD_COMMENT_DATE"
               echo "   🔑  Keyword comment found — using its date: ${REF_DATE}"
@@ -125,7 +152,7 @@ jobs:
             AGE=$(( NOW - REF_TS ))
             DAYS_AGO=$(( AGE / 86400 ))
 
-            # ── Staleness check ───────────────────────────────────────────
+            # ── Staleness check ────────────────────────────────────────────
             if [ "$AGE" -gt "$THRESHOLD" ]; then
               echo "   🏷  ${DAYS_AGO}d ago → stale — applying \"${LABEL_NAME}\""
               gh issue edit "$NUMBER" \
