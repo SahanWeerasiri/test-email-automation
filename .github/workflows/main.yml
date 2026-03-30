@@ -31,7 +31,7 @@ jobs:
       # The last comment whose body contains this keyword is used as the
       # reference date for the staleness check.
       # If no such comment exists, the issue createdAt is used instead.
-      KEYWORD_TRIGGER: "needs review"
+      KEYWORD_TRIGGER: "Customer Updated"
 
     steps:
       # ── 1. Harden the runner ─────────────────────────────────────────────
