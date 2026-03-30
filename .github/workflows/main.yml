@@ -20,7 +20,7 @@ jobs:
 
     env:
       STALE_THRESHOLD_DAYS: 14
-      STALE_THRESHOLD_SECONDS: 8640000 # 1209600  # 14 * 24 * 60 * 60
+      STALE_THRESHOLD_SECONDS: 8640000  # 14 * 24 * 60 * 60
 
       LABEL_NAME: "Need Attention"
       LABEL_COLOR: "e11d48"
@@ -28,9 +28,9 @@ jobs:
 
       REPORTER_LABEL: "Reporter/External"
 
-      # ── Keyword trigger ───────────────────────────────────────────────────
-      # If the last comment is within the threshold but contains this string,
-      # the label is still applied.
+      # The last comment whose body contains this keyword is used as the
+      # reference date for the staleness check.
+      # If no such comment exists, the issue createdAt is used instead.
       KEYWORD_TRIGGER: "needs review"
 
     steps:
@@ -72,6 +72,7 @@ jobs:
           SKIPPED=0
 
           echo "⏱  Stale threshold : ${STALE_THRESHOLD_DAYS} days (${THRESHOLD}s)"
+          echo "🔑  Keyword trigger : \"${KEYWORD_TRIGGER}\""
           echo "🏷  Target label    : \"${REPORTER_LABEL}\""
           echo "🔍  Fetching open issues with \"${REPORTER_LABEL}\" and without \"${LABEL_NAME}\" …"
           echo "────────────────────────────────────────"
@@ -81,7 +82,7 @@ jobs:
             --state open \
             --limit 100 \
             --search "label:\"${REPORTER_LABEL}\" -label:\"${LABEL_NAME}\"" \
-            --json number,title,updatedAt \
+            --json number,title,createdAt \
             2>/dev/null || echo "[]")
 
           COUNT=$(echo "$ISSUES" | jq 'length')
@@ -93,39 +94,47 @@ jobs:
           while IFS= read -r issue; do
             NUMBER=$(echo "$issue" | jq -r '.number')
             TITLE=$(echo "$issue"  | jq -r '.title')
+            CREATED_AT=$(echo "$issue" | jq -r '.createdAt')
 
             echo "🔎  #${NUMBER}: \"${TITLE}\""
 
-            # ── Fetch last comment date + body ─────────────────────────────
-            COMMENT_DATA=$(gh issue view "$NUMBER" \
+            # ── Find the last comment that contains the keyword ────────────
+            # jq walks all comments in reverse (last first) and returns the
+            # createdAt of the first one whose body matches the keyword
+            # (case-insensitive via ascii_downcase).
+            LOWER_KEYWORD=$(echo "$KEYWORD_TRIGGER" | tr '[:upper:]' '[:lower:]')
+
+            KEYWORD_COMMENT_DATE=$(gh issue view "$NUMBER" \
               --repo "$REPO" \
               --json comments \
-              --jq '.comments | if length > 0 then { date: last.createdAt, body: last.body } else { date: "", body: "" } end' \
-              2>/dev/null || echo '{"date":"","body":""}')
+              --jq --arg kw "$LOWER_KEYWORD" \
+              '[.comments[] | select((.body // "" | ascii_downcase) | contains($kw))] | last | .createdAt // ""' \
+              2>/dev/null || echo "")
 
-            LAST_COMMENT_DATE=$(echo "$COMMENT_DATA" | jq -r '.date')
-            LAST_COMMENT_BODY=$(echo "$COMMENT_DATA" | jq -r '.body')
-
-            # Fall back to updatedAt when there are no comments at all
-            if [ -z "$LAST_COMMENT_DATE" ]; then
-              LAST_COMMENT_DATE=$(echo "$issue" | jq -r '.updatedAt')
+            # ── Decide which date to use for the age check ────────────────
+            if [ -n "$KEYWORD_COMMENT_DATE" ] && [ "$KEYWORD_COMMENT_DATE" != "null" ]; then
+              REF_DATE="$KEYWORD_COMMENT_DATE"
+              echo "   🔑  Keyword comment found — using its date: ${REF_DATE}"
+            else
+              REF_DATE="$CREATED_AT"
+              echo "   📅  No keyword comment — falling back to issue createdAt: ${REF_DATE}"
             fi
 
-            LAST_TS=$(date -d "$LAST_COMMENT_DATE" +%s 2>/dev/null \
-                      || date -j -f "%Y-%m-%dT%H:%M:%SZ" "$LAST_COMMENT_DATE" +%s)
-            AGE=$(( NOW - LAST_TS ))
+            REF_TS=$(date -d "$REF_DATE" +%s 2>/dev/null \
+                     || date -j -f "%Y-%m-%dT%H:%M:%SZ" "$REF_DATE" +%s)
+            AGE=$(( NOW - REF_TS ))
             DAYS_AGO=$(( AGE / 86400 ))
 
-            # ── Date check: last comment older than threshold? ─────────────
+            # ── Staleness check ───────────────────────────────────────────
             if [ "$AGE" -gt "$THRESHOLD" ]; then
-              echo "   🏷  Last comment ${DAYS_AGO}d ago → applying \"${LABEL_NAME}\""
+              echo "   🏷  ${DAYS_AGO}d ago → stale — applying \"${LABEL_NAME}\""
               gh issue edit "$NUMBER" \
                 --repo "$REPO" \
                 --add-label "$LABEL_NAME"
               LABELLED=$(( LABELLED + 1 ))
-
             else
-              echo "   ➖  No match — skipping (Last comment ${DAYS_AGO}d ago)"
+              SECS_LEFT=$(( THRESHOLD - AGE ))
+              echo "   ✅  Within threshold — ${DAYS_AGO}d ago (${SECS_LEFT}s left) — skipping"
               SKIPPED=$(( SKIPPED + 1 ))
             fi
 
