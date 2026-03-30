@@ -125,7 +125,7 @@ jobs:
               LABELLED=$(( LABELLED + 1 ))
 
             else
-              echo "   ➖  No match — skipping (Last comment ${AGE}s ago)"
+              echo "   ➖  No match — skipping (Last comment ${AGE/86400}d ago)"
               SKIPPED=$(( SKIPPED + 1 ))
             fi
 
