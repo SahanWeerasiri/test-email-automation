@@ -114,10 +114,10 @@ jobs:
             LAST_TS=$(date -d "$LAST_COMMENT_DATE" +%s 2>/dev/null \
                       || date -j -f "%Y-%m-%dT%H:%M:%SZ" "$LAST_COMMENT_DATE" +%s)
             AGE=$(( NOW - LAST_TS ))
+            DAYS_AGO=$(( AGE / 86400 ))
 
             # ── Date check: last comment older than threshold? ─────────────
             if [ "$AGE" -gt "$THRESHOLD" ]; then
-              DAYS_AGO=$(( AGE / 86400 ))
               echo "   🏷  Last comment ${DAYS_AGO}d ago → applying \"${LABEL_NAME}\""
               gh issue edit "$NUMBER" \
                 --repo "$REPO" \
@@ -125,7 +125,7 @@ jobs:
               LABELLED=$(( LABELLED + 1 ))
 
             else
-              echo "   ➖  No match — skipping (Last comment ${AGE/86400}d ago)"
+              echo "   ➖  No match — skipping (Last comment ${DAYS_AGO}d ago)"
               SKIPPED=$(( SKIPPED + 1 ))
             fi
 
