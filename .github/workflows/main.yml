@@ -4,20 +4,9 @@ on:
   # 1a. Manual trigger
   workflow_dispatch:
 
-  # 1b. Every 2 weeks (production schedule)
+  # 1b. Every day (production schedule)
   schedule:
-    - cron: "0 0 */14 * *"   # every 14 days at midnight UTC
-
-  # 1c. Every 10 seconds is NOT supported by GitHub's scheduler
-  #     (minimum granularity is 5 minutes). For testing, use
-  #     workflow_dispatch above, or push a test commit to trigger
-  #     via a `push` event on a scratch branch:
-  #
-  # push:
-  #   branches: [ "test/stale-watcher" ]
-  #
-  # ⚠️  If you truly need sub-minute triggers for CI/CD testing,
-  #     run the script locally or via act (https://github.com/nektos/act).
+    - cron: '0 0 * * *'   # every 24 hours at midnight UTC
 
 permissions:
   issues: write      # needed to add labels
@@ -30,24 +19,26 @@ jobs:
     timeout-minutes: 10   # safety cap — avoids runaway billing
 
     env:
-      # ── Thresholds ────────────────────────────────────────────────────────
-      # Production: flag issues whose last comment is older than 14 days.
-      # Testing   : change to 30 (seconds) and run via workflow_dispatch.
-      STALE_THRESHOLD_DAYS: 14          # production value
-      # STALE_THRESHOLD_DAYS: 0          # uncomment for testing (30-sec sim)
-      STALE_THRESHOLD_SECONDS: 1209600  # 14 days in seconds (14*24*60*60)
-      # STALE_THRESHOLD_SECONDS: 30      # uncomment for testing
+      STALE_THRESHOLD_DAYS: 14
+      STALE_THRESHOLD_SECONDS: 1209600  # 14 * 24 * 60 * 60
 
       LABEL_NAME: "Need Attention"
-      LABEL_COLOR: "e11d48"   # red-600 — visible but not alarming
+      LABEL_COLOR: "e11d48"
       LABEL_DESC: "No recent activity — needs a follow-up"
+
+      REPORTER_LABEL: "Reporter/External"
+
+      # ── Keyword trigger ───────────────────────────────────────────────────
+      # If the last comment is within the threshold but contains this string,
+      # the label is still applied.
+      KEYWORD_TRIGGER: "needs review"
 
     steps:
       # ── 1. Harden the runner ─────────────────────────────────────────────
       - name: Harden runner
         uses: step-security/harden-runner@v2
         with:
-          egress-policy: audit   # switch to 'block' once you know your domains
+          egress-policy: audit
 
       # ── 2. Ensure the label exists ────────────────────────────────────────
       - name: Ensure "Need Attention" label exists
@@ -62,11 +53,13 @@ jobs:
             --color "$LABEL_COLOR" \
             --description "$LABEL_DESC" \
             --repo "${{ github.repository }}"
-          # 'create' fails if the label already exists; 'edit' updates it.
-          # Either way we end up with the correct label. Exit code is 0.
 
-      # ── 3. Fetch all open issues and triage them ──────────────────────────
-      - name: Triage open issues for stale activity
+      # ── 3. Fetch & triage ─────────────────────────────────────────────────
+      # Criteria:
+      #   - open
+      #   - has label: Reporter/External
+      #   - does NOT have label: Need Attention
+      - name: Triage open reporter issues
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
@@ -77,79 +70,68 @@ jobs:
           THRESHOLD=$STALE_THRESHOLD_SECONDS
           LABELLED=0
           SKIPPED=0
-          PAGE=1
 
-          echo "⏱  Stale threshold: ${STALE_THRESHOLD_DAYS} days (${THRESHOLD}s)"
-          echo "🔍  Scanning open issues in ${REPO} …"
+          echo "⏱  Stale threshold : ${STALE_THRESHOLD_DAYS} days (${THRESHOLD}s)"
+          echo "🏷  Target label    : \"${REPORTER_LABEL}\""
+          echo "🔍  Fetching open issues with \"${REPORTER_LABEL}\" and without \"${LABEL_NAME}\" …"
           echo "────────────────────────────────────────"
 
-          while true; do
-            # Fetch a page of open issues (not pull requests)
-            ISSUES=$(gh issue list \
+          ISSUES=$(gh issue list \
+            --repo "$REPO" \
+            --state open \
+            --limit 100 \
+            --search "label:\"${REPORTER_LABEL}\" -label:\"${LABEL_NAME}\"" \
+            --json number,title,updatedAt \
+            2>/dev/null || echo "[]")
+
+          COUNT=$(echo "$ISSUES" | jq 'length')
+          echo "   Found ${COUNT} candidate issue(s)"
+          echo "────────────────────────────────────────"
+
+          [ "$COUNT" -eq 0 ] && { echo "Nothing to do."; exit 0; }
+
+          while IFS= read -r issue; do
+            NUMBER=$(echo "$issue" | jq -r '.number')
+            TITLE=$(echo "$issue"  | jq -r '.title')
+
+            echo "🔎  #${NUMBER}: \"${TITLE}\""
+
+            # ── Fetch last comment date + body ─────────────────────────────
+            COMMENT_DATA=$(gh issue view "$NUMBER" \
               --repo "$REPO" \
-              --state open \
-              --limit 100 \
-              --json number,title,labels,updatedAt,comments \
-              --jq '[.[] | select(.comments != null)]' \
-              2>/dev/null || echo "[]")
+              --json comments \
+              --jq '.comments | if length > 0 then { date: last.createdAt, body: last.body } else { date: "", body: "" } end' \
+              2>/dev/null || echo '{"date":"","body":""}')
 
-            # Break if no more issues
-            COUNT=$(echo "$ISSUES" | jq 'length')
-            [ "$COUNT" -eq 0 ] && break
+            LAST_COMMENT_DATE=$(echo "$COMMENT_DATA" | jq -r '.date')
+            LAST_COMMENT_BODY=$(echo "$COMMENT_DATA" | jq -r '.body')
 
-            while IFS= read -r issue; do
-              NUMBER=$(echo "$issue" | jq -r '.number')
-              TITLE=$(echo "$issue"  | jq -r '.title')
+            # Fall back to updatedAt when there are no comments at all
+            if [ -z "$LAST_COMMENT_DATE" ]; then
+              LAST_COMMENT_DATE=$(echo "$issue" | jq -r '.updatedAt')
+            fi
 
-              # ── Find the date of the last comment ─────────────────────────
-              # gh issue list doesn't return comment dates; fetch them per issue.
-              LAST_COMMENT_DATE=$(gh issue view "$NUMBER" \
+            LAST_TS=$(date -d "$LAST_COMMENT_DATE" +%s 2>/dev/null \
+                      || date -j -f "%Y-%m-%dT%H:%M:%SZ" "$LAST_COMMENT_DATE" +%s)
+            AGE=$(( NOW - LAST_TS ))
+
+            # ── Date check: last comment older than threshold? ─────────────
+            if [ "$AGE" -gt "$THRESHOLD" ]; then
+              DAYS_AGO=$(( AGE / 86400 ))
+              echo "   🏷  Last comment ${DAYS_AGO}d ago → applying \"${LABEL_NAME}\""
+              gh issue edit "$NUMBER" \
                 --repo "$REPO" \
-                --json comments \
-                --jq '.comments | if length > 0 then last.createdAt else "" end' \
-                2>/dev/null || echo "")
+                --add-label "$LABEL_NAME"
+              LABELLED=$(( LABELLED + 1 ))
 
-              # Fall back to issue updatedAt if there are no comments
-              if [ -z "$LAST_COMMENT_DATE" ]; then
-                LAST_COMMENT_DATE=$(echo "$issue" | jq -r '.updatedAt')
-              fi
+            else
+              echo "   ➖  No match — skipping"
+              SKIPPED=$(( SKIPPED + 1 ))
+            fi
 
-              LAST_TS=$(date -d "$LAST_COMMENT_DATE" +%s 2>/dev/null \
-                        || date -j -f "%Y-%m-%dT%H:%M:%SZ" "$LAST_COMMENT_DATE" +%s)
-              AGE=$(( NOW - LAST_TS ))
+            echo ""
 
-              # ── Already labelled? Skip to avoid duplicate API calls ────────
-              ALREADY=$(echo "$issue" | jq -r \
-                --arg lbl "$LABEL_NAME" \
-                '.labels | map(select(.name == $lbl)) | length')
-
-              if [ "$ALREADY" -gt 0 ]; then
-                echo "⏭  #${NUMBER} already labelled — skipping"
-                SKIPPED=$(( SKIPPED + 1 ))
-                continue
-              fi
-
-              # ── Apply label if stale ──────────────────────────────────────
-              if [ "$AGE" -gt "$THRESHOLD" ]; then
-                DAYS_AGO=$(( AGE / 86400 ))
-                echo "🏷  #${NUMBER} — last activity ${DAYS_AGO}d ago → adding \"${LABEL_NAME}\""
-                echo "   Title: ${TITLE}"
-                gh issue edit "$NUMBER" \
-                  --repo "$REPO" \
-                  --add-label "$LABEL_NAME"
-                LABELLED=$(( LABELLED + 1 ))
-              else
-                SECS_LEFT=$(( THRESHOLD - AGE ))
-                echo "✅  #${NUMBER} — active within threshold (${SECS_LEFT}s remaining)"
-                SKIPPED=$(( SKIPPED + 1 ))
-              fi
-
-            done < <(echo "$ISSUES" | jq -c '.[]')
-
-            # gh issue list doesn't paginate via --page; 100 is the hard max.
-            # If you have >100 open issues, swap in the REST API below.
-            break
-          done
+          done < <(echo "$ISSUES" | jq -c '.[]')
 
           echo "────────────────────────────────────────"
-          echo "✔  Done. Labelled: ${LABELLED}  |  Skipped: ${SKIPPED}"
+          echo "✔  Done.  Labelled: ${LABELLED}  |  Skipped: ${SKIPPED}"

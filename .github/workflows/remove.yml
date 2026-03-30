@@ -1,0 +1,63 @@
+name: Remove "Need Attention" Label
+
+on:
+  workflow_dispatch:
+
+permissions:
+  issues: write
+  contents: read
+
+jobs:
+  remove-label:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    env:
+      LABEL_NAME: "Need Attention"
+
+    steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@v2
+        with:
+          egress-policy: audit
+
+      - name: Remove label from all issues
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+
+          echo "🧹  Removing \"${LABEL_NAME}\" from all issues in ${REPO} …"
+          echo "────────────────────────────────────────"
+
+          ISSUES=$(gh issue list \
+            --repo "$REPO" \
+            --state open \
+            --limit 100 \
+            --search "label:\"${LABEL_NAME}\"" \
+            --json number,title \
+            2>/dev/null || echo "[]")
+
+          COUNT=$(echo "$ISSUES" | jq 'length')
+          echo "   Found ${COUNT} issue(s) with the label"
+          echo "────────────────────────────────────────"
+
+          [ "$COUNT" -eq 0 ] && { echo "Nothing to do."; exit 0; }
+
+          REMOVED=0
+
+          while IFS= read -r issue; do
+            NUMBER=$(echo "$issue" | jq -r '.number')
+            TITLE=$(echo "$issue"  | jq -r '.title')
+
+            echo "🗑  #${NUMBER}: \"${TITLE}\""
+            gh issue edit "$NUMBER" \
+              --repo "$REPO" \
+              --remove-label "$LABEL_NAME"
+            REMOVED=$(( REMOVED + 1 ))
+
+          done < <(echo "$ISSUES" | jq -c '.[]')
+
+          echo "────────────────────────────────────────"
+          echo "✔  Done. Removed label from ${REMOVED} issue(s)."

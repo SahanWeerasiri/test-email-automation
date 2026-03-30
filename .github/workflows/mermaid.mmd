@@ -1,0 +1,48 @@
+flowchart TD
+    A([Workflow triggered]):::gray
+    A1[Manual]:::note
+    A2[Every day]:::note
+
+    subgraph GH ["☁️  GitHub Actions"]
+        B[Ensure label exists<br/>Create or update 'Need Attention']:::purple
+        C[Fetch open issues<br/>Reporter/External — exclude already-labelled]:::purple
+        D{Any issues?}:::gray
+        EXIT1([Exit]):::gray
+        BUILD[Build payload<br/>id · subject · date per issue]:::purple
+        FILTER[Filter out email-stale IDs<br/>from API response]:::purple
+
+        L1[Apply label]:::red
+        DONE([Done]):::gray
+    end
+
+    subgraph AS ["📜  Google Apps Script"]
+        AS1[Receive issues payload<br/>Validate secret]:::amber
+        AS2[For each issue<br/>Search Gmail by subject + epoch window]:::amber
+        AS3{Last email<br/>> threshold?}:::amber
+        AS4[Add ID to stale_ids]:::amber
+        AS5[Skip]:::amber
+        AS6[Return stale_ids]:::amber
+    end
+
+    A1 & A2 --> A
+    A --> B --> C --> D
+    D -- No --> EXIT1
+    D -- Yes --> BUILD
+
+    BUILD -- "POST {issues}" --> AS1
+    AS1 --> AS2 --> AS3
+    AS3 -- Yes --> AS4 --> AS2
+    AS3 -- No --> AS5 --> AS2
+    AS2 -- all done --> AS6
+    AS6 -- "stale_ids [ ]" --> FILTER
+
+    FILTER -- "email-stale issues<br/>apply label directly" --> L1
+
+    L1 --> DONE
+
+    classDef gray   fill:#D3D1C7,stroke:#5F5E5A,color:#2C2C2A
+    classDef purple fill:#CECBF6,stroke:#534AB7,color:#26215C
+    classDef teal   fill:#9FE1CB,stroke:#0F6E56,color:#04342C
+    classDef red    fill:#F7C1C1,stroke:#A32D2D,color:#501313
+    classDef amber  fill:#FAC775,stroke:#854F0B,color:#412402
+    classDef note   fill:none,stroke:none,color:#888780,font-size:11px
