@@ -5,40 +5,41 @@ flowchart TD
 
     subgraph GH ["☁️  GitHub Actions"]
         B[Ensure label exists<br/>Create or update 'Need Attention']:::purple
-        C[Fetch open issues<br/>Reporter/External — exclude already-labelled]:::purple
+        C[Fetch ALL open issues via pagination<br/>Reporter/External — exclude already-labelled]:::purple
         D{Any issues?}:::gray
         EXIT1([Exit]):::gray
-        BUILD[Build payload<br/>id · subject · date per issue]:::purple
-        FILTER[Filter out email-stale IDs<br/>from API response]:::purple
 
-        L1[Apply label]:::red
+        E[For each issue]:::gray
+
+        FC[Fetch ALL comments via pagination]:::teal
+
+        KW{Keyword comment<br/>exists?}:::gray
+        REFKW[Use keyword comment date<br/>as reference]:::teal
+        REFCA[Use issue createdAt<br/>as reference]:::teal
+
+        ST{Reference date<br/>> threshold?}:::gray
+        L1[Apply 'Need Attention' label]:::red
+        SKIP[Skip]:::gray
+
+        NEXT{More issues?}:::gray
         DONE([Done]):::gray
-    end
-
-    subgraph AS ["📜  Google Apps Script"]
-        AS1[Receive issues payload<br/>Validate secret]:::amber
-        AS2[For each issue<br/>Search Gmail by subject + epoch window]:::amber
-        AS3{Last email<br/>> threshold?}:::amber
-        AS4[Add ID to stale_ids]:::amber
-        AS5[Skip]:::amber
-        AS6[Return stale_ids]:::amber
     end
 
     A1 & A2 --> A
     A --> B --> C --> D
     D -- No --> EXIT1
-    D -- Yes --> BUILD
+    D -- Yes --> E
 
-    BUILD -- "POST {issues}" --> AS1
-    AS1 --> AS2 --> AS3
-    AS3 -- Yes --> AS4 --> AS2
-    AS3 -- No --> AS5 --> AS2
-    AS2 -- all done --> AS6
-    AS6 -- "stale_ids [ ]" --> FILTER
+    E --> FC --> KW
+    KW -- Yes --> REFKW --> ST
+    KW -- No --> REFCA --> ST
 
-    FILTER -- "email-stale issues<br/>apply label directly" --> L1
+    ST -- Yes --> L1
+    ST -- No --> SKIP
 
-    L1 --> DONE
+    L1 & SKIP --> NEXT
+    NEXT -- Yes --> E
+    NEXT -- No --> DONE
 
     classDef gray   fill:#D3D1C7,stroke:#5F5E5A,color:#2C2C2A
     classDef purple fill:#CECBF6,stroke:#534AB7,color:#26215C
