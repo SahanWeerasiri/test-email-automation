@@ -83,7 +83,7 @@ jobs:
         uses: actions/github-script@v7
         with:
           script: |
-            const STALE_THRESHOLD_DAYS = 14;
+            const STALE_THRESHOLD_DAYS = 100;
             const STALE_THRESHOLD_MS   = STALE_THRESHOLD_DAYS * 24 * 60 * 60 * 1000;
             const LABEL_NAME           = 'Need Attention';
             const KEYWORD_TRIGGER      = 'customer updated';
