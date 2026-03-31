@@ -48,31 +48,27 @@ jobs:
         with:
           script: |
             const REPORTER_LABEL = 'Reporter/External';
-            const LABEL_NAME     = 'Need Attention';
+            const STALE_LABEL    = 'Need Attention';
 
-            console.log(`🔍  Fetching ALL open issues …`);
+            console.log(`🔍  Fetching open issues labelled "${REPORTER_LABEL}" …`);
 
-            // Fetch every open issue — no server-side label filter,
-            // because the GitHub API stops paginating early when a label
-            // filter is combined with pagination, causing issues to be missed.
-            const allIssues = await github.paginate(github.rest.issues.listForRepo, {
+            const issues = await github.paginate(github.rest.issues.listForRepo, {
               owner:    context.repo.owner,
               repo:     context.repo.repo,
               state:    'open',
+              labels:   REPORTER_LABEL,
               per_page: 100,
             });
 
-            console.log(`   Total open issues fetched: ${allIssues.length}`);
-
-            // Filter entirely in JS — PRs out, must have REPORTER_LABEL,
-            // must NOT already have LABEL_NAME
-            const candidates = allIssues.filter(issue =>
+            // Explicitly exclude PRs and any issue already carrying the stale label
+            const candidates = issues.filter(issue =>
               !issue.pull_request &&
-              issue.labels.some(l => l.name === REPORTER_LABEL) &&
-              !issue.labels.some(l => l.name === LABEL_NAME)
+              !issue.labels.some(l => l.name === STALE_LABEL)
             );
 
-            console.log(`   Candidates (reporter, not yet stale-labelled): ${candidates.length}`);
+            console.log(`   Total with "${REPORTER_LABEL}"  : ${issues.length}`);
+            console.log(`   Already stale (excluded)      : ${issues.length - candidates.length}`);
+            console.log(`   Candidates to triage          : ${candidates.length}`);
 
             const slim = candidates.map(i => ({
               number:    i.number,
@@ -80,19 +76,28 @@ jobs:
               createdAt: i.created_at,
             }));
 
-            core.setOutput('issues', JSON.stringify(slim));
-            core.setOutput('count',  slim.length);
+            // ⚠️  Write to GITHUB_OUTPUT as base64 to safely handle titles
+            // with quotes, newlines, or other characters that would break
+            // direct ${{ steps.fetch.outputs.x }} interpolation in scripts.
+            const encoded = Buffer.from(JSON.stringify(slim)).toString('base64');
+            core.setOutput('issues_b64', encoded);
+            core.setOutput('count', slim.length);
 
       - name: Triage and label stale issues
         uses: actions/github-script@v7
+        env:
+          ISSUES_B64: ${{ steps.fetch.outputs.issues_b64 }}
         with:
           script: |
             const STALE_THRESHOLD_DAYS = 100;
             const STALE_THRESHOLD_MS   = STALE_THRESHOLD_DAYS * 24 * 60 * 60 * 1000;
-            const LABEL_NAME           = 'Need Attention';
+            const STALE_LABEL          = 'Need Attention';
             const KEYWORD_TRIGGER      = 'customer updated';
 
-            const issues = JSON.parse('${{ steps.fetch.outputs.issues }}');
+            // Decode safely via env var — immune to quote/newline injection
+            const issues = JSON.parse(
+              Buffer.from(process.env.ISSUES_B64, 'base64').toString('utf8')
+            );
 
             console.log(`⏱  Stale threshold : ${STALE_THRESHOLD_DAYS} days`);
             console.log(`🔑  Keyword trigger : "${KEYWORD_TRIGGER}"`);
@@ -111,7 +116,6 @@ jobs:
             for (const issue of issues) {
               console.log(`🔎  #${issue.number}: "${issue.title}"`);
 
-              // Fetch all comments for this issue (paginated)
               const comments = await github.paginate(github.rest.issues.listComments, {
                 owner:        context.repo.owner,
                 repo:         context.repo.repo,
@@ -119,7 +123,6 @@ jobs:
                 per_page:     100,
               });
 
-              // Find the last comment that contains the keyword
               const keywordComment = comments
                 .filter(c => c.body?.toLowerCase().includes(KEYWORD_TRIGGER))
                 .at(-1);
@@ -137,12 +140,12 @@ jobs:
               const daysOld = Math.floor(ageMs / (1000 * 60 * 60 * 24));
 
               if (ageMs > STALE_THRESHOLD_MS) {
-                console.log(`   🏷  ${daysOld}d old → stale — applying "${LABEL_NAME}"`);
+                console.log(`   🏷  ${daysOld}d old → stale — applying "${STALE_LABEL}"`);
                 await github.rest.issues.addLabels({
                   owner:        context.repo.owner,
                   repo:         context.repo.repo,
                   issue_number: issue.number,
-                  labels:       [LABEL_NAME],
+                  labels:       [STALE_LABEL],
                 });
                 labelled++;
               } else {
