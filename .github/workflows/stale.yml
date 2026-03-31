@@ -50,26 +50,30 @@ jobs:
             const REPORTER_LABEL = 'Reporter/External';
             const LABEL_NAME     = 'Need Attention';
 
-            console.log(`🔍  Fetching open issues labelled "${REPORTER_LABEL}" without "${LABEL_NAME}" …`);
+            console.log(`🔍  Fetching ALL open issues …`);
 
-            // Paginate through all open issues with the reporter label
-            const issues = await github.paginate(github.rest.issues.listForRepo, {
+            // Fetch every open issue — no server-side label filter,
+            // because the GitHub API stops paginating early when a label
+            // filter is combined with pagination, causing issues to be missed.
+            const allIssues = await github.paginate(github.rest.issues.listForRepo, {
               owner:    context.repo.owner,
               repo:     context.repo.repo,
               state:    'open',
-              labels:   REPORTER_LABEL,
               per_page: 100,
             });
 
-            // Filter out PRs and issues that already carry the stale label
-            const candidates = issues.filter(issue =>
+            console.log(`   Total open issues fetched: ${allIssues.length}`);
+
+            // Filter entirely in JS — PRs out, must have REPORTER_LABEL,
+            // must NOT already have LABEL_NAME
+            const candidates = allIssues.filter(issue =>
               !issue.pull_request &&
+              issue.labels.some(l => l.name === REPORTER_LABEL) &&
               !issue.labels.some(l => l.name === LABEL_NAME)
             );
 
-            console.log(`Found ${candidates.length} candidate issue(s).`);
+            console.log(`   Candidates (reporter, not yet stale-labelled): ${candidates.length}`);
 
-            // Pass only the fields we need downstream
             const slim = candidates.map(i => ({
               number:    i.number,
               title:     i.title,
