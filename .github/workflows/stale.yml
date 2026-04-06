@@ -2,8 +2,8 @@ name: Stale Issue Watcher
 
 on:
   workflow_dispatch:
-  schedule:
-    - cron: '0 0 * * *'
+  # schedule:
+  #   - cron: '0 0 * * *'  # Uncomment to run daily at midnight UTC
 
 permissions:
   issues: write
@@ -33,10 +33,10 @@ jobs:
                 color:       'e11d48',
                 description: 'No recent activity — needs a follow-up',
               });
-              console.log('✅  Label created.');
+              console.log('Label created.');
             } catch (err) {
               if (err.status === 422) {
-                console.log('ℹ️   Label already exists — skipping.');
+                console.log('Label already exists — skipping.');
               } else {
                 throw err;
               }
@@ -50,7 +50,7 @@ jobs:
             const REPORTER_LABEL = 'Reporter/External';
             const STALE_LABEL    = 'Need Attention';
 
-            console.log(`🔍  Fetching open issues labelled "${REPORTER_LABEL}" …`);
+            console.log(`Fetching open issues labelled "${REPORTER_LABEL}" …`);
 
             const issues = await github.paginate(github.rest.issues.listForRepo, {
               owner:    context.repo.owner,
@@ -76,7 +76,7 @@ jobs:
               createdAt: i.created_at,
             }));
 
-            // ⚠️  Write to GITHUB_OUTPUT as base64 to safely handle titles
+            // Write to GITHUB_OUTPUT as base64 to safely handle titles
             // with quotes, newlines, or other characters that would break
             // direct ${{ steps.fetch.outputs.x }} interpolation in scripts.
             const encoded = Buffer.from(JSON.stringify(slim)).toString('base64');
@@ -89,18 +89,18 @@ jobs:
           ISSUES_B64: ${{ steps.fetch.outputs.issues_b64 }}
         with:
           script: |
-            const STALE_THRESHOLD_DAYS = 14;
+            const STALE_THRESHOLD_DAYS = 100;
             const STALE_THRESHOLD_MS   = STALE_THRESHOLD_DAYS * 24 * 60 * 60 * 1000;
             const STALE_LABEL          = 'Need Attention';
-            const KEYWORD_TRIGGER_REGEX= /customer updated/i;
+            const KEYWORD_TRIGGER_REGEX= /customer updated.*?(\d{4}-\d{2}-\d{2})/i;
 
             // Decode safely via env var — immune to quote/newline injection
             const issues = JSON.parse(
               Buffer.from(process.env.ISSUES_B64, 'base64').toString('utf8')
             );
 
-            console.log(`⏱  Stale threshold : ${STALE_THRESHOLD_DAYS} days`);
-            console.log(`📋  Candidate issues: ${issues.length}`);
+            console.log(`Stale threshold : ${STALE_THRESHOLD_DAYS} days`);
+            console.log(`Candidate issues: ${issues.length}`);
             console.log('────────────────────────────────────────');
 
             if (issues.length === 0) {
@@ -113,7 +113,7 @@ jobs:
             const now    = Date.now();
 
             for (const issue of issues) {
-              console.log(`🔎  #${issue.number}: "${issue.title}"`);
+              console.log(`#${issue.number}: "${issue.title}"`);
 
               const comments = await github.paginate(github.rest.issues.listComments, {
                 owner:        context.repo.owner,
@@ -122,24 +122,44 @@ jobs:
                 per_page:     100,
               });
 
-              const keywordComment = comments
-                .filter(c => c.body?.toLowerCase().match(KEYWORD_TRIGGER_REGEX))
-                .at(-1);
-
               let refDate;
-              if (keywordComment) {
-                refDate = keywordComment.created_at;
-                console.log(`   🔑  Keyword comment found — using: ${refDate}`);
-              } else {
+              let dateSource = 'issue createdAt';
+
+              // Check for comment with exact regex (date extraction)
+              const regexMatch = comments.find(c => c.body?.toLowerCase().match(KEYWORD_TRIGGER_REGEX));
+              if (regexMatch) {
+                const match = regexMatch.body.match(KEYWORD_TRIGGER_REGEX);
+                if (match && match[1]) {
+                  refDate = match[1];
+                  dateSource = `regex extracted date from comment: ${refDate}`;
+                  console.log(`Keyword regex matched with date — using: ${refDate}`);
+                }
+              }
+
+              // If no regex match, check for simple "customer updated" comment
+              if (!refDate) {
+                const simpleKeywordComment = comments
+                  .filter(c => c.body?.toLowerCase().includes('customer updated'))
+                  .at(-1);
+                
+                if (simpleKeywordComment) {
+                  refDate = simpleKeywordComment.created_at;
+                  dateSource = 'last "customer updated" comment date';
+                  console.log(`Keyword "customer updated" comment found — using: ${refDate}`);
+                }
+              }
+
+              // Fall back to issue createdAt
+              if (!refDate) {
                 refDate = issue.createdAt;
-                console.log(`   📅  No keyword comment — using issue createdAt: ${refDate}`);
+                console.log(`No keyword comment — using issue createdAt: ${refDate}`);
               }
 
               const ageMs   = now - new Date(refDate).getTime();
               const daysOld = Math.floor(ageMs / (1000 * 60 * 60 * 24));
 
               if (ageMs > STALE_THRESHOLD_MS) {
-                console.log(`   🏷  ${daysOld}d old → stale — applying "${STALE_LABEL}"`);
+                console.log(`${daysOld}d old → stale — applying "${STALE_LABEL}"`);
                 await github.rest.issues.addLabels({
                   owner:        context.repo.owner,
                   repo:         context.repo.repo,
@@ -149,7 +169,7 @@ jobs:
                 labelled++;
               } else {
                 const daysLeft = STALE_THRESHOLD_DAYS - daysOld;
-                console.log(`   ✅  Within threshold — ${daysOld}d old (${daysLeft}d remaining) — skipping`);
+                console.log(`Within threshold — ${daysOld}d old (${daysLeft}d remaining) — skipping`);
                 skipped++;
               }
 
