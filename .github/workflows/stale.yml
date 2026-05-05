@@ -60,14 +60,10 @@ jobs:
               per_page: 100,
             });
 
-            // Explicitly exclude PRs and any issue already carrying the stale label
-            const candidates = issues.filter(issue =>
-              !issue.pull_request &&
-              !issue.labels.some(l => l.name === STALE_LABEL)
-            );
+            // Explicitly exclude PRs
+            const candidates = issues.filter(issue => !issue.pull_request);
 
             console.log(`   Total with "${REPORTER_LABEL}"  : ${issues.length}`);
-            console.log(`   Already stale (excluded)      : ${issues.length - candidates.length}`);
             console.log(`   Candidates to triage          : ${candidates.length}`);
 
             const slim = candidates.map(i => ({
@@ -167,7 +163,20 @@ jobs:
                   labels:       [STALE_LABEL],
                 });
                 labelled++;
-              } else {
+              } else {                
+                // Remove STALE_LABEL if present but no longer stale
+                issue.labels.forEach(label => {
+                  if (label.name === STALE_LABEL) {
+                    github.rest.issues.removeLabel({
+                      owner:        context.repo.owner,
+                      repo:         context.repo.repo,
+                      issue_number: issue.number,
+                      name:         STALE_LABEL,
+                    });
+                    console.log(`Issue has "${STALE_LABEL}" but is not stale — removing label`);
+                  }
+                });
+                
                 const daysLeft = STALE_THRESHOLD_DAYS - daysOld;
                 console.log(`Within threshold — ${daysOld}d old (${daysLeft}d remaining) — skipping`);
                 skipped++;
