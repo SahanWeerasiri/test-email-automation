@@ -70,6 +70,7 @@ jobs:
               number:    i.number,
               title:     i.title,
               createdAt: i.created_at,
+              labels:    i.labels.map(l => l.name),
             }));
 
             // Write to GITHUB_OUTPUT as base64 to safely handle titles
@@ -165,17 +166,15 @@ jobs:
                 labelled++;
               } else {                
                 // Remove STALE_LABEL if present but no longer stale
-                issue.labels.forEach(label => {
-                  if (label.name === STALE_LABEL) {
-                    github.rest.issues.removeLabel({
-                      owner:        context.repo.owner,
-                      repo:         context.repo.repo,
-                      issue_number: issue.number,
-                      name:         STALE_LABEL,
-                    });
-                    console.log(`Issue has "${STALE_LABEL}" but is not stale — removing label`);
-                  }
-                });
+                if (issue.labels.includes(STALE_LABEL)) {
+                  await github.rest.issues.removeLabel({
+                    owner:        context.repo.owner,
+                    repo:         context.repo.repo,
+                    issue_number: issue.number,
+                    name:         STALE_LABEL,
+                  });
+                  console.log(`Issue had "${STALE_LABEL}" but is not stale — removed`);
+                }
                 
                 const daysLeft = STALE_THRESHOLD_DAYS - daysOld;
                 console.log(`Within threshold — ${daysOld}d old (${daysLeft}d remaining) — skipping`);
